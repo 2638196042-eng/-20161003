@@ -1,0 +1,5 @@
+{
+  "name": "每日英语学习计划",
+  "description": "专为儿童设计的英语学习计划生成器，支持自定义教材与数量，一键生成打卡清单。",
+  "requestFramePermissions": []
+}
