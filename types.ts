@@ -29,3 +29,9 @@ export interface HistoryRecord {
   tasks: LearningTask[];
   timestamp: number;
 }
+
+export interface ChildProfile {
+  id: string;
+  name: string;
+  avatar: string;
+}

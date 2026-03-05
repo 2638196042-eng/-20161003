@@ -1,31 +1,146 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { LearningTask, HistoryRecord } from './types';
+import { LearningTask, HistoryRecord, ChildProfile } from './types';
 import { PlanDisplay } from './components/PlanDisplay';
 import { HistoryView } from './components/HistoryView';
+import { LockScreen } from './components/LockScreen';
+import { ProfileSettings } from './components/ProfileSettings';
 import { CATEGORY_CONFIGS, INITIAL_TASKS } from './constants';
-import { Rocket, RefreshCw, Copy, Check, Sparkles, Plus, Trash2, Calendar, LayoutDashboard, History as HistoryIcon, Save } from 'lucide-react';
+import { Rocket, RefreshCw, Copy, Check, Sparkles, Plus, Trash2, Calendar, LayoutDashboard, History as HistoryIcon, Save, Loader2, Users, Settings } from 'lucide-react';
+
+const DEFAULT_PROFILES: ChildProfile[] = [
+  { id: 'child_1', name: '大宝', avatar: '👦' }
+];
+
+// Helper to get or create device ID
+const getDeviceId = () => {
+  let id = localStorage.getItem('device_id');
+  if (!id) {
+    id = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 15);
+    localStorage.setItem('device_id', id);
+  }
+  return id;
+};
 
 const App: React.FC = () => {
   // Initialize date to YYYY-MM-DD
   const todayStr = new Date().toISOString().split('T')[0];
   
+  const [isUnlocked, setIsUnlocked] = useState<boolean | null>(null);
   const [view, setView] = useState<'plan' | 'history'>('plan');
+  const [showProfileSettings, setShowProfileSettings] = useState(false);
+
+  const [profiles, setProfiles] = useState<ChildProfile[]>(() => {
+    try {
+      const saved = localStorage.getItem('english_plan_profiles');
+      return saved ? JSON.parse(saved) : DEFAULT_PROFILES;
+    } catch (e) {
+      return DEFAULT_PROFILES;
+    }
+  });
+  const [activeChildId, setActiveChildId] = useState<string>(profiles[0].id);
+
   const [date, setDate] = useState<string>(todayStr);
-  const [tasks, setTasks] = useState<LearningTask[]>(INITIAL_TASKS);
+  
+  const [tasks, setTasks] = useState<LearningTask[]>(() => {
+    try {
+      // Migrate old tasks if they exist and we're on child_1
+      const oldTasks = localStorage.getItem('english_plan_tasks');
+      const saved = localStorage.getItem(`english_plan_tasks_${profiles[0].id}`);
+      if (saved) return JSON.parse(saved);
+      if (oldTasks) return JSON.parse(oldTasks);
+      return INITIAL_TASKS;
+    } catch (e) {
+      return INITIAL_TASKS;
+    }
+  });
+  
   const [showResult, setShowResult] = useState(false);
   const [copied, setCopied] = useState(false);
   
   // History State with localStorage
   const [history, setHistory] = useState<HistoryRecord[]>(() => {
     try {
-        const saved = localStorage.getItem('english_plan_history');
-        return saved ? JSON.parse(saved) : [];
+        // Migrate old history if it exists and we're on child_1
+        const oldHistory = localStorage.getItem('english_plan_history');
+        const saved = localStorage.getItem(`english_plan_history_${profiles[0].id}`);
+        if (saved) return JSON.parse(saved);
+        if (oldHistory) return JSON.parse(oldHistory);
+        return [];
     } catch (e) {
         return [];
     }
   });
 
   const resultRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    localStorage.setItem(`english_plan_tasks_${activeChildId}`, JSON.stringify(tasks));
+  }, [tasks, activeChildId]);
+
+  const switchChild = (childId: string) => {
+    setActiveChildId(childId);
+    try {
+      const savedTasks = localStorage.getItem(`english_plan_tasks_${childId}`);
+      setTasks(savedTasks ? JSON.parse(savedTasks) : INITIAL_TASKS);
+      
+      const savedHistory = localStorage.getItem(`english_plan_history_${childId}`);
+      setHistory(savedHistory ? JSON.parse(savedHistory) : []);
+    } catch (e) {
+      setTasks(INITIAL_TASKS);
+      setHistory([]);
+    }
+    setShowResult(false);
+  };
+
+  useEffect(() => {
+    const verifySavedKey = async () => {
+      const savedKey = localStorage.getItem('license_key');
+      if (!savedKey) {
+        setIsUnlocked(false);
+        return;
+      }
+
+      try {
+        const deviceId = getDeviceId();
+        const response = await fetch('/api/verify-key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: savedKey, deviceId }),
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+          setIsUnlocked(true);
+        } else {
+          setIsUnlocked(false);
+          localStorage.removeItem('license_key');
+        }
+      } catch (err) {
+        console.error('Failed to verify key:', err);
+        setIsUnlocked(false);
+      }
+    };
+
+    verifySavedKey();
+  }, []);
+
+  const handleUnlock = async (key: string): Promise<boolean> => {
+    const deviceId = getDeviceId();
+    const response = await fetch('/api/verify-key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, deviceId }),
+    });
+    
+    const data = await response.json();
+    if (data.success) {
+      localStorage.setItem('license_key', key);
+      setIsUnlocked(true);
+      return true;
+    } else {
+      throw new Error(data.message || '验证失败');
+    }
+  };
 
   // Helper to get formatted display date
   const getDisplayDate = (dStr: string) => {
@@ -70,14 +185,29 @@ const App: React.FC = () => {
           return record;
       });
       setHistory(newHistory);
-      localStorage.setItem('english_plan_history', JSON.stringify(newHistory));
+      localStorage.setItem(`english_plan_history_${activeChildId}`, JSON.stringify(newHistory));
+  };
+
+  const handleSaveProfiles = (newProfiles: ChildProfile[]) => {
+    setProfiles(newProfiles);
+    localStorage.setItem('english_plan_profiles', JSON.stringify(newProfiles));
+    
+    // If active child was deleted, switch to the first available
+    if (!newProfiles.find(p => p.id === activeChildId)) {
+      switchChild(newProfiles[0].id);
+    }
+    setShowProfileSettings(false);
   };
 
   const generatePlan = () => {
+    if (tasks.length === 0) {
+      alert('请先添加至少一个学习任务！');
+      return;
+    }
     setShowResult(true);
     setTimeout(() => {
-      resultRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, 100);
+      resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 150);
   };
 
   const saveToHistory = () => {
@@ -103,7 +233,7 @@ const App: React.FC = () => {
     }
 
     setHistory(newHistory);
-    localStorage.setItem('english_plan_history', JSON.stringify(newHistory));
+    localStorage.setItem(`english_plan_history_${activeChildId}`, JSON.stringify(newHistory));
     setView('history');
   };
 
@@ -114,7 +244,7 @@ const App: React.FC = () => {
       audio: tasks.filter(t => t.category === 'audio'),
     };
 
-    let text = `📅 ${getDisplayDate(date)} 英语执行清单\n`;
+    let text = `📅 ${getDisplayDate(date)} ${profiles.find(p => p.id === activeChildId)?.name}的英语执行清单\n`;
 
     if (grouped.core.length > 0) {
       text += `\n✅ 模块一：核心精读\n`;
@@ -149,9 +279,21 @@ const App: React.FC = () => {
     });
   };
 
+  if (isUnlocked === null) {
+    return (
+      <div className="min-h-screen bg-kid-bg flex items-center justify-center">
+        <Loader2 className="w-10 h-10 text-kid-sky animate-spin" />
+      </div>
+    );
+  }
+
+  if (!isUnlocked) {
+    return <LockScreen onUnlock={handleUnlock} />;
+  }
+
   return (
-    <div className="min-h-screen pb-24 px-4 pt-6 md:pt-12 font-sans text-gray-700">
-      <div className="max-w-5xl mx-auto">
+    <div className="min-h-screen pb-24 px-4 pt-6 md:pt-12 font-sans text-gray-700 relative">
+      <div className="max-w-5xl mx-auto relative z-10">
         
         {/* Top Header */}
         <div className="text-center md:text-left mb-8 flex flex-col md:flex-row justify-between items-center gap-4">
@@ -163,22 +305,45 @@ const App: React.FC = () => {
                 <p className="text-gray-500 font-medium mt-1">✨ 定制专属清单，记录点滴进步 ✨</p>
             </div>
             
-            {/* View Toggle */}
-            <div className="bg-white p-1.5 rounded-2xl shadow-sm border border-gray-200 flex">
-                <button 
-                    onClick={() => setView('plan')}
-                    className={`flex items-center gap-2 px-6 py-2 rounded-xl font-bold transition-all ${view === 'plan' ? 'bg-kid-sky text-white shadow-md' : 'text-gray-400 hover:bg-gray-50'}`}
-                >
-                    <LayoutDashboard className="w-5 h-5" />
-                    制定计划
-                </button>
-                <button 
-                    onClick={() => setView('history')}
-                    className={`flex items-center gap-2 px-6 py-2 rounded-xl font-bold transition-all ${view === 'history' ? 'bg-orange-400 text-white shadow-md' : 'text-gray-400 hover:bg-gray-50'}`}
-                >
-                    <HistoryIcon className="w-5 h-5" />
-                    阅读足迹
-                </button>
+            <div className="flex flex-col sm:flex-row items-center gap-4">
+                {/* Profile Selector */}
+                <div className="bg-white p-1.5 rounded-2xl shadow-sm border border-gray-200 flex items-center">
+                    {profiles.map(profile => (
+                        <button
+                            key={profile.id}
+                            onClick={() => switchChild(profile.id)}
+                            className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold transition-all ${activeChildId === profile.id ? 'bg-kid-pink text-white shadow-md' : 'text-gray-400 hover:bg-gray-50'}`}
+                        >
+                            <span className="text-xl">{profile.avatar}</span>
+                            {profile.name}
+                        </button>
+                    ))}
+                    <button 
+                        onClick={() => setShowProfileSettings(true)}
+                        className="ml-2 p-2 text-gray-400 hover:text-kid-sky hover:bg-blue-50 rounded-xl transition-colors"
+                        title="管理宝贝档案"
+                    >
+                        <Settings className="w-5 h-5" />
+                    </button>
+                </div>
+
+                {/* View Toggle */}
+                <div className="bg-white p-1.5 rounded-2xl shadow-sm border border-gray-200 flex">
+                    <button 
+                        onClick={() => setView('plan')}
+                        className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold transition-all ${view === 'plan' ? 'bg-kid-sky text-white shadow-md' : 'text-gray-400 hover:bg-gray-50'}`}
+                    >
+                        <LayoutDashboard className="w-5 h-5" />
+                        制定计划
+                    </button>
+                    <button 
+                        onClick={() => setView('history')}
+                        className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold transition-all ${view === 'history' ? 'bg-orange-400 text-white shadow-md' : 'text-gray-400 hover:bg-gray-50'}`}
+                    >
+                        <HistoryIcon className="w-5 h-5" />
+                        阅读足迹
+                    </button>
+                </div>
             </div>
         </div>
 
@@ -337,6 +502,19 @@ const App: React.FC = () => {
                 </div>
             </div>
         )}
+
+        {showProfileSettings && (
+          <ProfileSettings 
+            profiles={profiles} 
+            onSave={handleSaveProfiles} 
+            onClose={() => setShowProfileSettings(false)} 
+          />
+        )}
+      </div>
+      
+      {/* Global Footer */}
+      <div className="absolute bottom-6 left-0 w-full text-center pointer-events-none">
+        <p className="text-gray-400 text-sm font-medium tracking-widest">辣妈行动VIP会员专属</p>
       </div>
     </div>
   );
